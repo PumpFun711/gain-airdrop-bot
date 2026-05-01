@@ -1,0 +1,19 @@
+{
+  "name": "gain-airdrop-bot",
+  "version": "1.0.0",
+  "description": "$GAIN token airdrop engine — distributes 50% of creator fees to holders every 60s",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "@solana/spl-token": "^0.4.6",
+    "bs58": "^5.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
