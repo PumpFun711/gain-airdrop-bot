@@ -14,7 +14,7 @@ const TOKEN_MINT     = process.env.TOKEN_MINT;
 const FEE_WALLET_KEY = process.env.FEE_WALLET_KEY;
 const MIN_HOLD       = BigInt(process.env.MIN_HOLD || "500000000000");
 const AIRDROP_PCT    = parseFloat(process.env.AIRDROP_PCT || "0.50");
-const INTERVAL_MS    = parseInt(process.env.INTERVAL_MS || "60000");
+const INTERVAL_MS    = parseInt(process.env.INTERVAL_MS || "120000");
 const RESERVE_SOL    = parseFloat(process.env.RESERVE_SOL || "0.01");
 
 if (!TOKEN_MINT || !FEE_WALLET_KEY) {
@@ -24,8 +24,6 @@ if (!TOKEN_MINT || !FEE_WALLET_KEY) {
 
 const connection = new Connection(RPC_ENDPOINT, "confirmed");
 const feeWallet  = Keypair.fromSecretKey(bs58.decode(FEE_WALLET_KEY));
-
-const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
 let stats = {
   totalRounds: 0,
@@ -37,37 +35,56 @@ let stats = {
 
 module.exports = { getStats: () => stats };
 
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 async function getEligibleHolders() {
   const mintPubkey = new PublicKey(TOKEN_MINT);
-
-  const accounts = await connection.getParsedProgramAccounts(
-    TOKEN_PROGRAM_ID,
-    {
-      filters: [
-        { dataSize: 165 },
-        { memcmp: { offset: 0, bytes: mintPubkey.toBase58() } },
-      ],
-    }
-  );
-
-  console.log(`Total token accounts found: ${accounts.length}`);
-
-  const holders = [];
-  for (const { account } of accounts) {
+  
+  console.log(`Fetching largest accounts for mint: ${TOKEN_MINT}`);
+  
+  let attempts = 0;
+  let accounts = null;
+  
+  while (attempts < 5) {
     try {
-      const parsed = account.data?.parsed?.info;
-      if (!parsed) continue;
-      const amount = BigInt(parsed.tokenAmount.amount);
-      const owner  = parsed.owner;
-      if (amount >= MIN_HOLD) {
-        holders.push({ wallet: owner, amount });
-      }
+      accounts = await connection.getTokenLargestAccounts(mintPubkey, "confirmed");
+      break;
     } catch (e) {
-      console.error("Error parsing account:", e.message);
+      attempts++;
+      console.log(`Attempt ${attempts} failed: ${e.message} — retrying in 3s`);
+      await sleep(3000);
     }
   }
 
-  console.log(`Found ${holders.length} eligible holders (>= ${Number(MIN_HOLD) / 1e6} tokens)`);
+  if (!accounts || !accounts.value.length) {
+    console.log("⚠️  No token accounts returned from RPC");
+    return [];
+  }
+
+  console.log(`Top accounts returned: ${accounts.value.length}`);
+  accounts.value.forEach(a => console.log(`  ${a.address.toBase58().slice(0,8)}... amount: ${a.amount}`));
+
+  const holders = [];
+  for (const account of accounts.value) {
+    try {
+      if (BigInt(account.amount) >= MIN_HOLD) {
+        await sleep(300);
+        const info = await connection.getParsedAccountInfo(account.address);
+        const owner = info.value?.data?.parsed?.info?.owner;
+        if (owner) {
+          holders.push({
+            wallet: owner,
+            amount: BigInt(account.amount),
+          });
+          console.log(`  ✅ Eligible: ${owner.slice(0,8)}... holding ${account.uiAmountString}`);
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching account info:", e.message);
+    }
+  }
+
+  console.log(`Found ${holders.length} eligible holders`);
   return holders;
 }
 
@@ -139,7 +156,7 @@ async function runRound() {
       } catch (err) {
         console.error(`  ❌ Batch failed:`, err.message);
       }
-      if (i + BATCH < shares.length) await new Promise(r => setTimeout(r, 1500));
+      if (i + BATCH < shares.length) await sleep(1500);
     }
 
     stats.totalRounds++;
