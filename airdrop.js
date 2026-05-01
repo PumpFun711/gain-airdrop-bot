@@ -17,6 +17,10 @@ const AIRDROP_PCT    = parseFloat(process.env.AIRDROP_PCT || "0.50");
 const INTERVAL_MS    = parseInt(process.env.INTERVAL_MS || "120000");
 const RESERVE_SOL    = parseFloat(process.env.RESERVE_SOL || "0.01");
 
+const EXCLUDED_WALLETS = new Set([
+  "bDod6GMhG3dc3bhPwUrCJvYrJ3nMXoBsPRvv4Cm8hFs",
+]);
+
 if (!TOKEN_MINT || !FEE_WALLET_KEY) {
   console.error("❌  Missing TOKEN_MINT or FEE_WALLET_KEY");
   process.exit(1);
@@ -39,12 +43,12 @@ async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function getEligibleHolders() {
   const mintPubkey = new PublicKey(TOKEN_MINT);
-  
+
   console.log(`Fetching largest accounts for mint: ${TOKEN_MINT}`);
-  
+
   let attempts = 0;
   let accounts = null;
-  
+
   while (attempts < 5) {
     try {
       accounts = await connection.getTokenLargestAccounts(mintPubkey, "confirmed");
@@ -62,7 +66,6 @@ async function getEligibleHolders() {
   }
 
   console.log(`Top accounts returned: ${accounts.value.length}`);
-  accounts.value.forEach(a => console.log(`  ${a.address.toBase58().slice(0,8)}... amount: ${a.amount}`));
 
   const holders = [];
   for (const account of accounts.value) {
@@ -71,12 +74,14 @@ async function getEligibleHolders() {
         await sleep(300);
         const info = await connection.getParsedAccountInfo(account.address);
         const owner = info.value?.data?.parsed?.info?.owner;
-        if (owner) {
+        if (owner && !EXCLUDED_WALLETS.has(owner)) {
           holders.push({
             wallet: owner,
             amount: BigInt(account.amount),
           });
           console.log(`  ✅ Eligible: ${owner.slice(0,8)}... holding ${account.uiAmountString}`);
+        } else if (owner && EXCLUDED_WALLETS.has(owner)) {
+          console.log(`  ⛔ Excluded: ${owner.slice(0,8)}...`);
         }
       }
     } catch (e) {
@@ -97,8 +102,9 @@ async function getAirdropPool() {
 }
 
 function calcShares(holders, poolLamports) {
-  const totalTokens = holders.reduce((sum, h) => sum + h.amount, BigInt(0));
-  return holders.map((h) => ({
+  const filtered = holders.filter(h => !EXCLUDED_WALLETS.has(h.wallet));
+  const totalTokens = filtered.reduce((sum, h) => sum + h.amount, BigInt(0));
+  return filtered.map((h) => ({
     wallet: h.wallet,
     amount: h.amount,
     lamports: Math.floor(Number((BigInt(poolLamports) * h.amount) / totalTokens)),
