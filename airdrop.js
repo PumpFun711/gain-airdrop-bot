@@ -7,19 +7,18 @@ const {
   LAMPORTS_PER_SOL,
   sendAndConfirmTransaction,
 } = require("@solana/web3.js");
-const { TOKEN_PROGRAM_ID } = require("@solana/spl-token");
 const bs58 = require("bs58");
 
-const RPC_ENDPOINT = process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
-const TOKEN_MINT   = process.env.TOKEN_MINT;
+const RPC_ENDPOINT  = process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
+const TOKEN_MINT    = process.env.TOKEN_MINT;
 const FEE_WALLET_KEY = process.env.FEE_WALLET_KEY;
-const MIN_HOLD     = BigInt(process.env.MIN_HOLD || "500000000000");
-const AIRDROP_PCT  = parseFloat(process.env.AIRDROP_PCT || "0.50");
-const INTERVAL_MS  = parseInt(process.env.INTERVAL_MS || "60000");
-const RESERVE_SOL  = parseFloat(process.env.RESERVE_SOL || "0.01");
+const MIN_HOLD      = BigInt(process.env.MIN_HOLD || "500000000000");
+const AIRDROP_PCT   = parseFloat(process.env.AIRDROP_PCT || "0.50");
+const INTERVAL_MS   = parseInt(process.env.INTERVAL_MS || "60000");
+const RESERVE_SOL   = parseFloat(process.env.RESERVE_SOL || "0.01");
 
 if (!TOKEN_MINT || !FEE_WALLET_KEY) {
-  console.error("❌  Missing TOKEN_MINT or FEE_WALLET_KEY in environment variables");
+  console.error("❌  Missing TOKEN_MINT or FEE_WALLET_KEY");
   process.exit(1);
 }
 
@@ -38,28 +37,33 @@ module.exports = { getStats: () => stats };
 
 async function getEligibleHolders() {
   const mintPubkey = new PublicKey(TOKEN_MINT);
-  const accounts = await connection.getProgramAccounts(TOKEN_PROGRAM_ID, {
-    filters: [
-      { dataSize: 165 },
-      { memcmp: { offset: 0, bytes: mintPubkey.toBase58() } },
-    ],
-  });
-
+  const largest = await connection.getTokenLargestAccounts(mintPubkey);
+  
   const holders = [];
-  for (const { account } of accounts) {
-    const data   = account.data;
-    const owner  = new PublicKey(data.slice(32, 64));
-    const amount = data.readBigUInt64LE(64);
-    if (amount >= MIN_HOLD) {
-      holders.push({ wallet: owner.toBase58(), amount });
+  for (const account of largest.value) {
+    try {
+      if (BigInt(account.amount) >= MIN_HOLD) {
+        const info = await connection.getParsedAccountInfo(account.address);
+        const owner = info.value?.data?.parsed?.info?.owner;
+        if (owner) {
+          holders.push({
+            wallet: owner,
+            amount: BigInt(account.amount),
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching account:", e.message);
     }
   }
+  
+  console.log(`Found ${holders.length} eligible holders`);
   return holders;
 }
 
 async function getAirdropPool() {
-  const balance  = await connection.getBalance(feeWallet.publicKey);
-  const reserve  = Math.floor(RESERVE_SOL * LAMPORTS_PER_SOL);
+  const balance   = await connection.getBalance(feeWallet.publicKey);
+  const reserve   = Math.floor(RESERVE_SOL * LAMPORTS_PER_SOL);
   const available = balance - reserve;
   if (available <= 0) return 0;
   return Math.floor(available * AIRDROP_PCT);
@@ -84,6 +88,11 @@ async function runRound() {
 
     if (poolLamports < 10000) {
       console.log("⚠️  Pool too small — waiting for more fees");
+      return;
+    }
+
+    if (holders.length === 0) {
+      console.log("⚠️  No eligible holders yet");
       return;
     }
 
@@ -142,6 +151,7 @@ async function runRound() {
 console.log("🚀  $GAIN Airdrop Engine started");
 console.log(`   Wallet : ${feeWallet.publicKey.toBase58()}`);
 console.log(`   Token  : ${TOKEN_MINT}`);
+console.log(`   Min    : ${Number(MIN_HOLD) / 1e6} tokens`);
 
 runRound();
 setInterval(runRound, INTERVAL_MS);
