@@ -1,0 +1,147 @@
+const {
+  Connection,
+  PublicKey,
+  Keypair,
+  Transaction,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+  sendAndConfirmTransaction,
+} = require("@solana/web3.js");
+const { TOKEN_PROGRAM_ID } = require("@solana/spl-token");
+const bs58 = require("bs58");
+
+const RPC_ENDPOINT = process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
+const TOKEN_MINT   = process.env.TOKEN_MINT;
+const FEE_WALLET_KEY = process.env.FEE_WALLET_KEY;
+const MIN_HOLD     = BigInt(process.env.MIN_HOLD || "500000000000");
+const AIRDROP_PCT  = parseFloat(process.env.AIRDROP_PCT || "0.50");
+const INTERVAL_MS  = parseInt(process.env.INTERVAL_MS || "60000");
+const RESERVE_SOL  = parseFloat(process.env.RESERVE_SOL || "0.01");
+
+if (!TOKEN_MINT || !FEE_WALLET_KEY) {
+  console.error("❌  Missing TOKEN_MINT or FEE_WALLET_KEY in environment variables");
+  process.exit(1);
+}
+
+const connection = new Connection(RPC_ENDPOINT, "confirmed");
+const feeWallet  = Keypair.fromSecretKey(bs58.decode(FEE_WALLET_KEY));
+
+let stats = {
+  totalRounds: 0,
+  totalSolDistributed: 0,
+  totalWalletsAirdropped: 0,
+  lastRound: null,
+  history: [],
+};
+
+module.exports = { getStats: () => stats };
+
+async function getEligibleHolders() {
+  const mintPubkey = new PublicKey(TOKEN_MINT);
+  const accounts = await connection.getProgramAccounts(TOKEN_PROGRAM_ID, {
+    filters: [
+      { dataSize: 165 },
+      { memcmp: { offset: 0, bytes: mintPubkey.toBase58() } },
+    ],
+  });
+
+  const holders = [];
+  for (const { account } of accounts) {
+    const data   = account.data;
+    const owner  = new PublicKey(data.slice(32, 64));
+    const amount = data.readBigUInt64LE(64);
+    if (amount >= MIN_HOLD) {
+      holders.push({ wallet: owner.toBase58(), amount });
+    }
+  }
+  return holders;
+}
+
+async function getAirdropPool() {
+  const balance  = await connection.getBalance(feeWallet.publicKey);
+  const reserve  = Math.floor(RESERVE_SOL * LAMPORTS_PER_SOL);
+  const available = balance - reserve;
+  if (available <= 0) return 0;
+  return Math.floor(available * AIRDROP_PCT);
+}
+
+function calcShares(holders, poolLamports) {
+  const totalTokens = holders.reduce((sum, h) => sum + h.amount, BigInt(0));
+  return holders.map((h) => ({
+    wallet: h.wallet,
+    amount: h.amount,
+    lamports: Math.floor(Number((BigInt(poolLamports) * h.amount) / totalTokens)),
+  })).filter((h) => h.lamports > 5000);
+}
+
+async function runRound() {
+  console.log(`\n[${new Date().toISOString()}] ── Starting airdrop round ──`);
+  try {
+    const [holders, poolLamports] = await Promise.all([
+      getEligibleHolders(),
+      getAirdropPool(),
+    ]);
+
+    if (poolLamports < 10000) {
+      console.log("⚠️  Pool too small — waiting for more fees");
+      return;
+    }
+
+    const shares = calcShares(holders, poolLamports);
+    console.log(`✅  ${holders.length} eligible | Pool: ${(poolLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL | Sending to ${shares.length}`);
+
+    const BATCH = 10;
+    let sentLamports = 0;
+    const roundDrops = [];
+
+    for (let i = 0; i < shares.length; i += BATCH) {
+      const batch = shares.slice(i, i + BATCH);
+      const tx = new Transaction();
+      for (const { wallet, lamports } of batch) {
+        tx.add(SystemProgram.transfer({
+          fromPubkey: feeWallet.publicKey,
+          toPubkey:   new PublicKey(wallet),
+          lamports,
+        }));
+      }
+      try {
+        const sig = await sendAndConfirmTransaction(connection, tx, [feeWallet]);
+        for (const s of batch) {
+          sentLamports += s.lamports;
+          roundDrops.push({
+            wallet: s.wallet,
+            tokens: s.amount.toString(),
+            sol: (s.lamports / LAMPORTS_PER_SOL).toFixed(6),
+            sig,
+            ts: new Date().toISOString(),
+          });
+          console.log(`  → ${s.wallet.slice(0,8)}...${s.wallet.slice(-4)}  +${(s.lamports/LAMPORTS_PER_SOL).toFixed(6)} SOL`);
+        }
+      } catch (err) {
+        console.error(`  ❌ Batch failed:`, err.message);
+      }
+      if (i + BATCH < shares.length) await new Promise(r => setTimeout(r, 1500));
+    }
+
+    stats.totalRounds++;
+    stats.totalSolDistributed += sentLamports / LAMPORTS_PER_SOL;
+    stats.totalWalletsAirdropped += roundDrops.length;
+    stats.lastRound = {
+      ts: new Date().toISOString(),
+      wallets: roundDrops.length,
+      solDistributed: (sentLamports / LAMPORTS_PER_SOL).toFixed(6),
+    };
+    stats.history = [...roundDrops, ...stats.history].slice(0, 50);
+    console.log(`✅  Round complete — ${(sentLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL to ${roundDrops.length} wallets`);
+
+  } catch (err) {
+    console.error("❌  Round error:", err.message);
+  }
+}
+
+console.log("🚀  $GAIN Airdrop Engine started");
+console.log(`   Wallet : ${feeWallet.publicKey.toBase58()}`);
+console.log(`   Token  : ${TOKEN_MINT}`);
+
+runRound();
+setInterval(runRound, INTERVAL_MS);
