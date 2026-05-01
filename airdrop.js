@@ -9,13 +9,13 @@ const {
 } = require("@solana/web3.js");
 const bs58 = require("bs58");
 
-const RPC_ENDPOINT  = process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
-const TOKEN_MINT    = process.env.TOKEN_MINT;
+const RPC_ENDPOINT   = process.env.RPC_ENDPOINT || "https://api.mainnet-beta.solana.com";
+const TOKEN_MINT     = process.env.TOKEN_MINT;
 const FEE_WALLET_KEY = process.env.FEE_WALLET_KEY;
-const MIN_HOLD      = BigInt(process.env.MIN_HOLD || "500000000000");
-const AIRDROP_PCT   = parseFloat(process.env.AIRDROP_PCT || "0.50");
-const INTERVAL_MS   = parseInt(process.env.INTERVAL_MS || "60000");
-const RESERVE_SOL   = parseFloat(process.env.RESERVE_SOL || "0.01");
+const MIN_HOLD       = BigInt(process.env.MIN_HOLD || "500000000000");
+const AIRDROP_PCT    = parseFloat(process.env.AIRDROP_PCT || "0.50");
+const INTERVAL_MS    = parseInt(process.env.INTERVAL_MS || "60000");
+const RESERVE_SOL    = parseFloat(process.env.RESERVE_SOL || "0.01");
 
 if (!TOKEN_MINT || !FEE_WALLET_KEY) {
   console.error("❌  Missing TOKEN_MINT or FEE_WALLET_KEY");
@@ -24,6 +24,8 @@ if (!TOKEN_MINT || !FEE_WALLET_KEY) {
 
 const connection = new Connection(RPC_ENDPOINT, "confirmed");
 const feeWallet  = Keypair.fromSecretKey(bs58.decode(FEE_WALLET_KEY));
+
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
 let stats = {
   totalRounds: 0,
@@ -37,27 +39,35 @@ module.exports = { getStats: () => stats };
 
 async function getEligibleHolders() {
   const mintPubkey = new PublicKey(TOKEN_MINT);
-  const largest = await connection.getTokenLargestAccounts(mintPubkey);
-  
+
+  const accounts = await connection.getParsedProgramAccounts(
+    TOKEN_PROGRAM_ID,
+    {
+      filters: [
+        { dataSize: 165 },
+        { memcmp: { offset: 0, bytes: mintPubkey.toBase58() } },
+      ],
+    }
+  );
+
+  console.log(`Total token accounts found: ${accounts.length}`);
+
   const holders = [];
-  for (const account of largest.value) {
+  for (const { account } of accounts) {
     try {
-      if (BigInt(account.amount) >= MIN_HOLD) {
-        const info = await connection.getParsedAccountInfo(account.address);
-        const owner = info.value?.data?.parsed?.info?.owner;
-        if (owner) {
-          holders.push({
-            wallet: owner,
-            amount: BigInt(account.amount),
-          });
-        }
+      const parsed = account.data?.parsed?.info;
+      if (!parsed) continue;
+      const amount = BigInt(parsed.tokenAmount.amount);
+      const owner  = parsed.owner;
+      if (amount >= MIN_HOLD) {
+        holders.push({ wallet: owner, amount });
       }
     } catch (e) {
-      console.error("Error fetching account:", e.message);
+      console.error("Error parsing account:", e.message);
     }
   }
-  
-  console.log(`Found ${holders.length} eligible holders`);
+
+  console.log(`Found ${holders.length} eligible holders (>= ${Number(MIN_HOLD) / 1e6} tokens)`);
   return holders;
 }
 
